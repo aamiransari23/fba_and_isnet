@@ -5,16 +5,15 @@ import networks.layers_WS as L
 
 def build_model(weights):
     net_encoder = fba_encoder()
-
     net_decoder = fba_decoder()
-
     model = MattingModule(net_encoder, net_decoder)
 
-    if(weights != 'default'):
-        sd = torch.load(weights)
+    if weights != 'default':
+        sd = torch.load(weights, map_location=torch.device('cpu'))  # ✅ force CPU load
         model.load_state_dict(sd, strict=True)
 
     return model
+
 
 
 class MattingModule(nn.Module):

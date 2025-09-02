@@ -10,23 +10,17 @@ from scipy.ndimage import grey_dilation, grey_erosion
 from networks.isnet import ISNetDIS
 from networks.transforms import trimap_transform, normalise_image
 from networks.models import build_model
+from demo import pred
+from config import *
+from skimage import io
+import torch.nn.functional as F
+from torchvision.transforms.functional import normalize
 
 
-def np_to_torch(x, permute=True):
-    if permute:
-        return torch.from_numpy(x).permute(2, 0, 1)[None, :, :, :].float().cuda()
-    else:
-        return torch.from_numpy(x)[None, :, :, :].float().cuda()
 
 
 
-def scale_input(x: np.ndarray, scale: float, scale_type) -> np.ndarray:
-    ''' Scales inputs to multiple of 8. '''
-    h, w = x.shape[:2]
-    h1 = int(np.ceil(scale * h / 8) * 8)
-    w1 = int(np.ceil(scale * w / 8) * 8)
-    x_scale = cv2.resize(x, (w1, h1), interpolation=scale_type)
-    return x_scale
+
 
 
 def load_isnet_model(model_path):
@@ -177,59 +171,80 @@ def ensemble_matte(net, image_np):
     matte = np.clip(matte, 0.0, 1.0)
     return matte
 
+
 def process_single_image(isnet_model, fba_model, image_path, output_folder, threshold=150):
     """
-    Process a single image through the model
+    Process a single image through ISNet + FBA
     """
     # Load image
     try:
-        original_image = io.imread(image_path)
-        # Ensure image is in RGB format (skimage returns RGB or RGBA)
-        if len(original_image.shape) == 3 and original_image.shape[2] == 4:
-            # Convert RGBA to RGB
+        original_image = io.imread(image_path)  # skimage → RGB or RGBA
+        if original_image is None:
+            raise FileNotFoundError(f"Could not read image at {image_path}")
+
+        # Convert RGBA → RGB if needed
+        if original_image.ndim == 3 and original_image.shape[2] == 4:
             original_image = cv2.cvtColor(original_image, cv2.COLOR_RGBA2RGB)
+        elif original_image.ndim == 2:  # grayscale → RGB
+            original_image = cv2.cvtColor(original_image, cv2.COLOR_GRAY2RGB)
     except Exception as e:
         print(f"Error loading image {image_path}: {e}")
         return False
-    
-    # Run ensemble inference (multi-scale / TTA) or single-pass
+
+    # Run ISNet inference
     try:
-        matte01 = ensemble_matte(isnet_model, original_image)  # float32 in [0,1]
+        matte01 = ensemble_matte(isnet_model, original_image).astype(np.float32)  # (H,W), [0,1]
         mask = (matte01 * 255.0).astype(np.uint8)
         print(f"ISNet inference completed for {image_path}")
     except Exception as e:
         print(f"Error running inference on {image_path}: {e}")
         return False
 
-    
-    # Create binary mask
+    # Create binary mask + trimap
     binary_mask = create_binary_mask(mask, threshold)
     trimap = binary_to_trimap(binary_mask, fg_width_px=5, bg_width_px=70)
-    trimap = np_to_torch(trimap, permute=False)
+    print(trimap.shape)
+    trimap_np = trimap.detach().cpu().numpy()
+    # Ensure shape is (H, W, 2)
+    if trimap_np.ndim == 4:  # (N,C,H,W)
+        trimap_np = np.transpose(trimap_np[0], (1, 2, 0))  # → (H,W,C)
+    elif trimap_np.ndim == 3 and trimap_np.shape[0] == 2:  # (C,H,W)
+        trimap_np = np.transpose(trimap_np, (1, 2, 0))     # → (H,W,C)
 
+    # ---- FIX: ensure shape is (H,W,2) ----
+    if trimap_np.ndim == 3 and trimap_np.shape[-1] == 1:
+        bg = (trimap_np[:, :, 0] == 0).astype(np.uint8)
+        fg = (trimap_np[:, :, 0] == 1).astype(np.uint8)
+        trimap_np = np.stack([bg, fg], axis=-1)
+
+    print("DEBUG fixed trimap_np:", trimap_np.shape)  # should be (H,W,2)
+    
+    print(trimap_np.shape)
+
+
+    # Run FBA inference
     try:
-        fg, bg, alpha = fba_pred(original_image, trimap, fba_model)
+        fg, bg, alpha = pred(original_image.astype(np.float32) / 255.0, trimap_np, fba_model)
         print(f"FBA inference completed for {image_path}")
     except Exception as e:
         print(f"Error running inference on {image_path}: {e}")
         return False
-    
-    # Create outputs with black and white background
-    black_bg_image = create_output_with_black_background(original_image, fg,bg,alpha, threshold)
-    white_bg_image = create_output_with_white_background(original_image, fg,bg,alpha, threshold)
 
-    
-    # Get image name without extension
+    # Generate outputs
+    black_bg_image = create_output_with_black_background(original_image, fg, bg, alpha)
+    white_bg_image = create_output_with_white_background(original_image, fg, bg, alpha)
+
+    # Save
     image_name = os.path.splitext(os.path.basename(image_path))[0]
-    
-    # Save outputs
     try:
-        saved = save_outputs(output_folder, image_name, original_image, binary_mask, black_bg_image, white_bg_image, trimap)
+        saved = save_outputs(output_folder, image_name, original_image, binary_mask,
+                             black_bg_image, white_bg_image, trimap)
         print(f"  Saved: {list(saved.values())}")
         return True
     except Exception as e:
         print(f"Error saving outputs for {image_path}: {e}")
         return False
+
 
 
 def find_all_images(root_path, extensions):
@@ -263,42 +278,44 @@ def create_binary_mask(mask, threshold=150):
     binary_mask = (mask >= threshold).astype(np.uint8) * 255
     return binary_mask
 
-import numpy as np
 
-def create_output_with_black_background(original_image, fg, bg, alpha, threshold=150):
+def create_output_with_black_background(original_image, fg, bg, alpha):
     """
-    Create output image with black background instead of transparency.
-    Uses alpha to composite fg over black background.
+    Composite original image over a black background using alpha.
+    Foreground = original image * alpha
+    Background = black
     """
     # Normalize alpha to [0,1]
     if alpha.max() > 1:
         alpha = alpha / 255.0
-    alpha = np.expand_dims(alpha, axis=-1) if alpha.ndim == 2 else alpha
+    if alpha.ndim == 2:
+        alpha = np.expand_dims(alpha, axis=-1)
 
-    # Black background
     black_bg = np.zeros_like(original_image, dtype=np.uint8)
 
-    # Composite: out = fg * alpha + black * (1 - alpha)
-    output = (fg * alpha + black_bg * (1 - alpha)).astype(np.uint8)
+    # Composite: image * alpha + black * (1 - alpha)
+    output = (original_image * alpha + black_bg * (1 - alpha)).astype(np.uint8)
     return output
 
 
-def create_output_with_white_background(original_image, fg, bg, alpha, threshold=150):
+def create_output_with_white_background(original_image, fg, bg, alpha):
     """
-    Create output image with white background instead of transparency.
-    Uses alpha to composite fg over white background.
+    Composite original image over a white background using alpha.
+    Foreground = original image * alpha
+    Background = white
     """
     # Normalize alpha to [0,1]
     if alpha.max() > 1:
         alpha = alpha / 255.0
-    alpha = np.expand_dims(alpha, axis=-1) if alpha.ndim == 2 else alpha
+    if alpha.ndim == 2:
+        alpha = np.expand_dims(alpha, axis=-1)
 
-    # White background
     white_bg = np.ones_like(original_image, dtype=np.uint8) * 255
 
-    # Composite: out = fg * alpha + white * (1 - alpha)
-    output = (fg * alpha + white_bg * (1 - alpha)).astype(np.uint8)
+    # Composite: image * alpha + white * (1 - alpha)
+    output = (original_image * alpha + white_bg * (1 - alpha)).astype(np.uint8)
     return output
+
 
 
 def _ensure_bgr(img_rgb):
@@ -356,11 +373,11 @@ def save_outputs(output_folder, image_name, original_image_rgb, binary_mask, bla
 
     # Save original (RGB → BGR for OpenCV)
     original_path = os.path.join(output_folder, f"{image_name}_original.png")
-    cv2.imwrite(original_path, _ensure_bgr(original_image_rgb))
+    # cv2.imwrite(original_path, _ensure_bgr(original_image_rgb))
 
     # Save mask
     mask_path = os.path.join(output_folder, f"{image_name}_mask.png")
-    cv2.imwrite(mask_path, binary_mask.astype(np.uint8))
+    # cv2.imwrite(mask_path, binary_mask.astype(np.uint8))
 
     # Save black/white background images
     black_path = os.path.join(output_folder, f"{image_name}_black.png")
@@ -371,7 +388,7 @@ def save_outputs(output_folder, image_name, original_image_rgb, binary_mask, bla
     # Save trimap (converted to grayscale image with 0,128,255)
     tri = _to_trimap_uint8(trimap)
     trimap_path = os.path.join(output_folder, f"{image_name}_trimap.png")
-    cv2.imwrite(trimap_path, tri)
+    # cv2.imwrite(trimap_path, tri)
 
     return {
         "original": original_path,
@@ -569,13 +586,22 @@ def fba_pred(image_np: np.ndarray, trimap_np: np.ndarray, model) -> np.ndarray:
             trimap_torch,
             image_transformed_torch,
             trimap_transformed_torch)
-        output = cv2.resize(
-            output[0].cpu().numpy().transpose(
-                (1, 2, 0)), (w, h), cv2.INTER_LANCZOS4)
+        out = output[0].detach().cpu().numpy()  # (C,H,W)
+        out = np.transpose(out, (1, 2, 0))      # (H,W,C)
 
-    alpha = output[:, :, 0]
-    fg = output[:, :, 1:4]
-    bg = output[:, :, 4:7]
+        # Ensure it's float32 for OpenCV
+        out = out.astype(np.float32)
+
+        # Check dimensions
+        if w <= 0 or h <= 0:
+            raise ValueError(f"Invalid resize dimensions: {(w,h)}")
+
+        out_resized = cv2.resize(out, (w, h), interpolation=cv2.INTER_LANCZOS4)
+
+
+    alpha = out_resized[:, :, 0]
+    fg = out_resized[:, :, 1:4]
+    bg = out_resized[:, :, 4:7]
 
     alpha[trimap_np[:, :, 0] == 1] = 0
     alpha[trimap_np[:, :, 1] == 1] = 1

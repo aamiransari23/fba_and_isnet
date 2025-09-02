@@ -15,21 +15,12 @@ import time
 from tqdm import tqdm
 from utils import find_all_images, check_output_exists, create_binary_mask, create_output_with_black_background, create_output_with_white_background, save_outputs
 from utils import load_isnet_model
+from config import *
+from utils import process_single_image
 
 
-INPUT_DATASET_PATH = '../test_images'
-INFERENCE_OUTPUT_DIR = '../infernece_results'
 FBA_MODEL_DIR = '../model_weights'
-IMAGE_EXTENSIONS = [
-    "*.jpg", "*.JPG", "*.jpeg", "*.JPEG",
-    "*.png", "*.PNG"
-]
 
-def np_to_torch(x, permute=True):
-    if permute:
-        return torch.from_numpy(x).permute(2, 0, 1)[None, :, :, :].float().cuda()
-    else:
-        return torch.from_numpy(x)[None, :, :, :].float().cuda()
 
 
 def parse_arguments():
@@ -100,7 +91,7 @@ def main():
     for image_path in tqdm(all_images):
         image_name = os.path.splitext(os.path.basename(image_path))[0]
 
-        if check_output_exists(target_output_dir, image_name):
+        if check_output_exists(INFERENCE_OUTPUT_DIR, image_name):
             skipped_count += 1
             continue
 
