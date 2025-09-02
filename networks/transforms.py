@@ -18,8 +18,9 @@ def trimap_transform(trimap, L = 320):
     return clicks
 
 # For RGB !
-imagenet_norm_std =  torch.from_numpy(np.array([0.229, 0.224, 0.225])).float().cuda()[None, :, None, None]
-imagenet_norm_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).float().cuda()[None, :, None, None]
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+imagenet_norm_std = torch.from_numpy(np.array([0.229, 0.224, 0.225])).float().to(device)[None, :, None, None]
+imagenet_norm_mean = torch.from_numpy(np.array([0.485, 0.456, 0.406])).float().to(device)[None, :, None, None]
 
 
 def normalise_image(image, mean=imagenet_norm_mean, std=imagenet_norm_std):

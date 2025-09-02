@@ -1,5 +1,20 @@
-torch>=1.4.0
-numpy
-matplotlib
-gdown
-opencv-python
+# Core dependencies
+torch>=1.9.0
+torchvision>=0.10.0
+numpy>=1.21.0
+scipy>=1.7.0
+scikit-image>=0.18.0
+PyYAML>=5.4.0
+
+# Optional dependencies
+wandb>=0.12.0  # For experiment tracking
+matplotlib>=3.3.0  # For plotting (if needed)
+Pillow>=8.0.0  # For image processing
+tqdm>=4.62.3  # For progress bars
+opencv-python-headless>=4.5.0  # For optional OpenCV trimap precompute path
+opencv-python>=4.5.0  # For optional OpenCV trimap precompute path
+
+# Custom modules (should be in your project)
+# data_loader_cache  # Your custom data loading module
+# basics  # Your custom metrics module  
+# models  # Your custom models module
