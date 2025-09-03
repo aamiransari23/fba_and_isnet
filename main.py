@@ -41,6 +41,7 @@ def main():
     # Find all images in the input dataset
     print(f"Searching for images in: {INPUT_DATASET_PATH}")
     all_images = find_all_images(INPUT_DATASET_PATH, IMAGE_EXTENSIONS)
+    
     print(f"Found {len(all_images)} images to process")
 
     if len(all_images) == 0:
